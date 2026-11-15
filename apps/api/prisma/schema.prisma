@@ -1,0 +1,147 @@
+generator client {
+  provider   = "prisma-client"
+  output     = "../src/generated/prisma"
+  engineType = "client"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Role {
+  ADMIN
+  CUSTOMER
+  RESELLER
+}
+
+enum WebsiteStatus {
+  PENDING
+  ACTIVE
+  SUSPENDED
+  FAILED
+}
+
+enum JobStatus {
+  QUEUED
+  RUNNING
+  SUCCEEDED
+  FAILED
+  CANCELLED
+}
+
+model User {
+  id           String          @id @default(cuid())
+  email        String          @unique
+  username     String?         @unique
+  passwordHash String
+  name         String
+  role         Role            @default(CUSTOMER)
+  mustChangePassword Boolean   @default(false)
+  sessionVersion Int          @default(0)
+  disabledAt     DateTime?
+  websiteLimit   Int             @default(5)
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
+  websites     Website[]
+  auditEvents  AuditLog[]
+  jobs         Job[]
+}
+
+model Node {
+  id            String    @id @default(cuid())
+  name          String
+  hostname      String    @unique
+  nodeType      String    @default("remote")
+  operatingSystem String?
+  cpuCores      Int?
+  ipAddresses   String[]  @default([])
+  systemInfo    Json?
+  agentUrl      String?
+  agentSecretCiphertext String?
+  bootstrapIssuedAt DateTime?
+  region        String?
+  status        String    @default("pending")
+  agentVersion  String?
+  lastHeartbeat DateTime?
+  cpuPercent    Float?
+  memoryUsed    BigInt?
+  memoryTotal   BigInt?
+  diskUsed      BigInt?
+  diskTotal     BigInt?
+  networkRxBytes BigInt?
+  networkTxBytes BigInt?
+  createdAt     DateTime  @default(now())
+  websites      Website[]
+  agentNonces   AgentNonce[]
+}
+
+model Installation {
+  id          String   @id @default("singleton")
+  status      String   @default("NOT_STARTED")
+  steps       Json     @default("[]")
+  lastError   String?
+  completedAt DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model AgentNonce {
+  id        String   @id @default(cuid())
+  nodeId    String
+  nonce     String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  node      Node     @relation(fields: [nodeId], references: [id], onDelete: Cascade)
+  @@unique([nodeId, nonce])
+  @@index([expiresAt])
+}
+
+model Website {
+  id           String        @id @default(cuid())
+  ownerId      String
+  nodeId       String?
+  primaryDomain String      @unique
+  documentRoot String       @default("public_html")
+  runtime      String        @default("static")
+  tlsStatus    String        @default("disabled")
+  status       WebsiteStatus @default(PENDING)
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  owner        User          @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  node         Node?         @relation(fields: [nodeId], references: [id], onDelete: SetNull)
+  jobs         Job[]
+  @@index([ownerId, status])
+}
+
+model Job {
+  id          String    @id @default(cuid())
+  idempotencyKey String @unique
+  type        String
+  status      JobStatus @default(QUEUED)
+  payload     Json
+  attempts    Int       @default(0)
+  lastError   String?
+  availableAt DateTime  @default(now())
+  lockedUntil DateTime?
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+  websiteId   String?
+  website     Website?  @relation(fields: [websiteId], references: [id], onDelete: SetNull)
+  ownerId     String?
+  owner       User?     @relation(fields: [ownerId], references: [id], onDelete: SetNull)
+  @@index([ownerId, createdAt])
+  @@index([status, availableAt, createdAt])
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  actorId    String?
+  action     String
+  resource   String
+  resourceId String?
+  metadata   Json?
+  ipAddress  String?
+  createdAt  DateTime @default(now())
+  actor      User?    @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  @@index([createdAt])
+}

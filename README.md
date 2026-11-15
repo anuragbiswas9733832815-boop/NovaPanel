@@ -17,21 +17,25 @@ The dashboard does not fabricate live data. Modules without real service impleme
 
 ## Debian/Ubuntu VPS installer
 
-The root-level `installer.sh` clones this GitHub repository (default branch `main`), then provisions PostgreSQL, Node.js 22+, a checksum-verified Go toolchain, Nginx, Certbot, the API/web systemd services, TLS, database migrations, the one-time initial admin, and the Local Node agent. It is designed for a clean Debian/Ubuntu systemd VPS; it does not use or install another hosting panel.
+The root-level `installer.sh` reuses a recognized NovaPanel checkout under `/opt` or `/root`, or clones a clean copy under `/opt/nova-panel` when none exists. It then provisions PostgreSQL, Node.js 22+, a checksum-verified Go toolchain, Nginx, Certbot, the API/web systemd services, TLS, database migrations, the one-time initial admin, and the Local Node agent. It supports Debian/Ubuntu with systemd and does not install another hosting panel. At the confirmation prompt, type `INST` (or `INSTALL`, `YES`, or `Y`) to proceed.
 
-First point a public DNS A/AAAA record at the VPS and allow TCP 80, 443 and 8443 in the provider firewall. Review the script before running it with root privileges:
+For a public production site, first point a public DNS A/AAAA record at the VPS and allow TCP 80, 443 and 8443 in the provider firewall. Review the script before running it with root privileges:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/anuragbiswas9733832815-boop/NovaPanel/main/installer.sh -o installer.sh
 less installer.sh
-sudo bash installer.sh                  # prompts for domain and ACME email
-# Non-interactive alternative:
-sudo env NOVA_DOMAIN=panel.example.com NOVA_EMAIL=ops@example.com NOVA_CONFIRM_INSTALL=YES bash installer.sh
+sudo bash installer.sh                  # prompts for address; Enter defaults to localhost
+# Public, non-interactive install:
+sudo env NOVA_DOMAIN=panel.example.com NOVA_EMAIL=ops@example.com NOVA_MODE=public NOVA_CONFIRM_INSTALL=YES bash installer.sh
+# Local-only install without public DNS or an ACME email:
+sudo env NOVA_DOMAIN=localhost NOVA_MODE=local NOVA_CONFIRM_INSTALL=YES bash installer.sh
 ```
 
-The installer does not enable UFW automatically (to avoid locking out a VPS on a nonstandard SSH port). If UFW is already active it allows SSH, 80, 443 and 8443. It binds PostgreSQL to its local default and panel processes to loopback; do not expose ports 3000, 4000 or 5432. A failed step can be retried by rerunning the installer; it preserves panel keys and existing accounts, and never resets the initial admin. It intentionally uses the required initial `admin` / `admin` password, so log in over HTTPS and change it immediately. Keep `/etc/nova-panel/api.env` and `/etc/nova-agent/agent.env` backed up securely.
+`NOVA_MODE=auto` is the default: localhost, single-label/common local names, and private IP addresses use local mode; other fully qualified names use public mode. Set `NOVA_MODE=local` for any other non-public hostname (including one served by private DNS), or `NOVA_MODE=public` to require Let’s Encrypt. This avoids silently treating a mistyped public domain as a local installation. Local mode generates a private CA and HTTPS certificate; browsers on other devices will need `/etc/nova-panel/local-ca.crt` installed as a trusted CA. Localhost/internal hostnames bind the panel to loopback (same-machine access); a private IPv4 address assigned to the VPS binds only that interface for LAN access. Use public mode for a publicly reachable VPS. Public mode requires valid public DNS and ACME-reachable TCP 80.
 
-Requirements/limitations: a supported Debian/Ubuntu x86_64 or arm64 VPS, working systemd and apt, public DNS already resolving, outbound HTTPS for package/toolchain downloads, and an ACME-reachable TCP 80. Certbot/TLS issuance will stop and report an error if DNS/firewall/IPv6 routing is wrong. Review systemd/Nginx settings and your VPS firewall before production use; no installer can verify the provider firewall or DNS ownership for you.
+If UFW is already active, public mode allows SSH, 80, 443 and 8443; loopback-only local mode does not open panel ports. Private-IP LAN mode also leaves UFW unchanged—configure access to 80, 443 and 8443 only from trusted LAN ranges. PostgreSQL and panel processes stay on loopback; do not expose ports 3000, 4000 or 5432. A failed step can be retried; installer keys and accounts are preserved and the initial admin password is never reset. Log in with the required initial `admin` / `admin` password and change it immediately. Keep `/etc/nova-panel/api.env` and `/etc/nova-agent/agent.env` backed up securely.
+
+Requirements: supported Debian/Ubuntu x86_64 or arm64, systemd and apt, and outbound HTTPS for package/toolchain downloads. Public mode additionally needs public DNS and an ACME-reachable TCP 80. Review systemd/Nginx settings and your provider firewall before production use; the installer cannot verify provider firewall rules or DNS ownership.
 
 ## Local control-plane development
 

@@ -21,16 +21,78 @@ if ! command -v systemctl >/dev/null || ! command -v apt-get >/dev/null; then ec
 
 NOVA_DOMAIN_INPUT=${NOVA_DOMAIN:-}
 NOVA_EMAIL_INPUT=${NOVA_EMAIL:-}
-if [[ -t 0 ]]; then
-  [[ -n "$NOVA_DOMAIN_INPUT" ]] || read -r -p 'Panel DNS name (A/AAAA records must point to this VPS): ' NOVA_DOMAIN_INPUT
-  [[ -n "$NOVA_EMAIL_INPUT" ]] || read -r -p 'ACME certificate email: ' NOVA_EMAIL_INPUT
+if [[ -t 0 && -z "$NOVA_DOMAIN_INPUT" ]]; then
+  read -r -p 'Panel address (localhost for local-only access, or a public DNS name) [localhost]: ' NOVA_DOMAIN_INPUT
 fi
-DOMAIN=$NOVA_DOMAIN_INPUT
-EMAIL=$NOVA_EMAIL_INPUT
+DOMAIN=${NOVA_DOMAIN_INPUT:-localhost}
 DOMAIN=${DOMAIN,,}
-[[ "$DOMAIN" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$ ]] || { echo 'Set NOVA_DOMAIN to a valid public fully qualified domain name.' >&2; exit 2; }
-[[ "$EMAIL" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}$ ]] || { echo 'Set NOVA_EMAIL to a valid ACME contact email.' >&2; exit 2; }
-if ! getent ahosts "$DOMAIN" >/dev/null; then echo "$DOMAIN does not resolve yet. Configure public DNS and retry." >&2; exit 1; fi
+MODE=${NOVA_MODE:-auto}
+[[ "$MODE" == auto || "$MODE" == local || "$MODE" == public ]] || { echo 'NOVA_MODE must be auto, local, or public.' >&2; exit 2; }
+
+is_ipv4() { [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; }
+is_private_ipv4() {
+  local address=$1 a b c d
+  is_ipv4 "$address" || return 1
+  IFS=. read -r a b c d <<< "$address"
+  ((10#$a <= 255 && 10#$b <= 255 && 10#$c <= 255 && 10#$d <= 255)) || return 1
+  ((10#$a == 10 || 10#$a == 127 || (10#$a == 192 && 10#$b == 168) || (10#$a == 172 && 10#$b >= 16 && 10#$b <= 31) || (10#$a == 169 && 10#$b == 254)))
+}
+valid_hostname() { [[ "$1" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]]; }
+LOCAL_NAME=false
+if [[ "$DOMAIN" == localhost || "$DOMAIN" == *.localhost || "$DOMAIN" == *.local || "$DOMAIN" == *.lan || "$DOMAIN" == *.test || "$DOMAIN" == *.internal ]] || is_private_ipv4 "$DOMAIN" || [[ "$DOMAIN" != *.* ]]; then LOCAL_NAME=true; fi
+if [[ "$MODE" == auto ]]; then [[ "$LOCAL_NAME" == true ]] && MODE=local || MODE=public; fi
+
+if [[ "$MODE" == local ]]; then
+  valid_hostname "$DOMAIN" || is_private_ipv4 "$DOMAIN" || { echo 'Local mode accepts localhost/internal hostnames or a private IPv4 address. For a public name, use NOVA_MODE=public.' >&2; exit 2; }
+  LOCAL_MODE=true
+  if is_private_ipv4 "$DOMAIN" && [[ "$DOMAIN" != 127.* ]]; then
+    IP_ON_HOST=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -Fx "$DOMAIN" || true)
+    [[ -n "$IP_ON_HOST" ]] || { echo "Private IP $DOMAIN is not assigned to this machine." >&2; exit 1; }
+    BIND_ADDRESS=$DOMAIN
+    AGENT_LISTEN="${DOMAIN}:8443"
+    LAN_ADDRESS_MODE=true
+    NGINX_HTTP_LISTEN="    listen ${DOMAIN}:80;"
+    NGINX_HTTPS_LISTEN="    listen ${DOMAIN}:443 ssl http2;"
+  else
+    BIND_ADDRESS=127.0.0.1
+    AGENT_LISTEN=127.0.0.1:8443
+    LAN_ADDRESS_MODE=false
+    NGINX_HTTP_LISTEN=$'    listen 127.0.0.1:80;\n    listen [::1]:80;'
+    NGINX_HTTPS_LISTEN=$'    listen 127.0.0.1:443 ssl http2;\n    listen [::1]:443 ssl http2;'
+    if [[ "$DOMAIN" != localhost && "$DOMAIN" != *.localhost ]]; then
+      HOSTS_TMP=$(mktemp)
+      awk -v hostname="$DOMAIN" '{
+        line=$1; found=0
+        for (i=2; i<=NF; i++) {
+          if ($i == hostname) { found=1; continue }
+          line=line " " $i
+        }
+        if (!found || line != $1) print line
+      }' /etc/hosts > "$HOSTS_TMP"
+      printf '127.0.0.1 %s\n' "$DOMAIN" >> "$HOSTS_TMP"
+      cat "$HOSTS_TMP" > /etc/hosts
+      rm -f "$HOSTS_TMP"
+    fi
+  fi
+  if [[ -t 0 && -z "$NOVA_EMAIL_INPUT" ]]; then
+    read -r -p 'ACME contact email (optional in local mode; press Enter to skip): ' NOVA_EMAIL_INPUT
+  fi
+  EMAIL=${NOVA_EMAIL_INPUT:-admin@localhost.invalid}
+  [[ "$EMAIL" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}$ ]] || { echo 'NOVA_EMAIL must be a valid email address.' >&2; exit 2; }
+  echo 'Local mode selected: no public DNS or Let’s Encrypt certificate is required. HTTPS uses a private local CA.'
+else
+  [[ "$DOMAIN" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$ ]] || { echo 'Public mode requires a fully qualified DNS name; use NOVA_MODE=local for localhost/private hosts.' >&2; exit 2; }
+  if [[ -t 0 && -z "$NOVA_EMAIL_INPUT" ]]; then read -r -p 'ACME certificate email: ' NOVA_EMAIL_INPUT; fi
+  EMAIL=$NOVA_EMAIL_INPUT
+  [[ "$EMAIL" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,63}$ ]] || { echo 'Set NOVA_EMAIL to a valid ACME contact email.' >&2; exit 2; }
+  getent ahosts "$DOMAIN" >/dev/null || { echo "$DOMAIN does not resolve yet. Configure public DNS and retry, or use NOVA_MODE=local." >&2; exit 1; }
+  LOCAL_MODE=false
+  LAN_ADDRESS_MODE=false
+  BIND_ADDRESS=127.0.0.1
+  AGENT_LISTEN=:8443
+  NGINX_HTTP_LISTEN=$'    listen 80;\n    listen [::]:80;'
+  NGINX_HTTPS_LISTEN=$'    listen 443 ssl http2;\n    listen [::]:443 ssl http2;'
+fi
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
@@ -39,7 +101,7 @@ systemctl enable --now postgresql nginx
 
 # Do not silently enable UFW on a remote host (which can lock out nonstandard SSH ports).
 # If the operator already enabled UFW, allow the panel and node-agent ports.
-if command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q 'Status: active'; then
+if [[ "$LOCAL_MODE" != true ]] && command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q 'Status: active'; then
   ufw allow OpenSSH || true
   ufw allow 80/tcp
   ufw allow 443/tcp
@@ -132,7 +194,17 @@ DB_USER=nova_panel
 DB_NAME=nova_panel
 DATABASE_URL="postgresql://${DB_USER}:${DB_PASSWORD}@127.0.0.1:5432/${DB_NAME}?schema=public"
 PANEL_ORIGIN="https://${DOMAIN}"
+NOVA_CONTROL_URL=$PANEL_ORIGIN
 LOCAL_AGENT_URL="https://${DOMAIN}:8443"
+if [[ "$LOCAL_MODE" == true ]]; then
+  TLS_CERT_PATH=/etc/nova-panel/local-server.crt
+  TLS_KEY_PATH=/etc/nova-panel/local-server.key
+  LOCAL_CA_PATH=/etc/nova-panel/local-ca.crt
+else
+  TLS_CERT_PATH="/etc/letsencrypt/live/${DOMAIN}/fullchain.pem"
+  TLS_KEY_PATH="/etc/letsencrypt/live/${DOMAIN}/privkey.pem"
+  LOCAL_CA_PATH=''
+fi
 cat > "$API_ENV" <<EOF
 DATABASE_URL="$DATABASE_URL"
 NOVA_DB_PASSWORD="$DB_PASSWORD"
@@ -148,6 +220,7 @@ HOST=127.0.0.1
 PORT=4000
 TRUSTED_PROXY_ADDRESSES=127.0.0.1,::1
 EOF
+if [[ "$LOCAL_MODE" == true ]]; then printf 'NODE_EXTRA_CA_CERTS=%s\n' "$LOCAL_CA_PATH" >> "$API_ENV"; fi
 chown root:nova-api "$API_ENV"
 chmod 0640 "$API_ENV"
 
@@ -173,10 +246,32 @@ install -d -o nova-web -g nova-web -m 0750 "$INSTALL_DIR/apps/web/.next/cache"
 
 NGINX_SITE="/etc/nginx/sites-available/nova-panel-${DOMAIN}"
 NGINX_ENABLED="/etc/nginx/sites-enabled/nova-panel-${DOMAIN}"
-cat > "$NGINX_SITE" <<EOF
+if [[ "$LOCAL_MODE" == true ]]; then
+  install -d -o root -g nova-api -m 0750 /etc/nova-panel
+  if [[ ! -s "$LOCAL_CA_PATH" ]]; then
+    openssl genrsa -out /etc/nova-panel/local-ca.key 3072
+    chmod 0600 /etc/nova-panel/local-ca.key
+    openssl req -x509 -new -nodes -key /etc/nova-panel/local-ca.key -sha256 -days 3650 \
+      -subj '/CN=NovaPanel Local Installation CA' -addext 'basicConstraints=critical,CA:TRUE' \
+      -addext 'keyUsage=critical,keyCertSign,cRLSign' -out "$LOCAL_CA_PATH"
+  fi
+  [[ -s /etc/nova-panel/local-ca.key ]] || { echo 'Local CA private key is missing; restore it alongside local-ca.crt before retrying.' >&2; exit 1; }
+  openssl genrsa -out "$TLS_KEY_PATH" 2048
+  chmod 0600 "$TLS_KEY_PATH"
+  openssl req -new -key "$TLS_KEY_PATH" -subj "/CN=${DOMAIN}" -out /etc/nova-panel/local-server.csr
+  if is_ipv4 "$DOMAIN"; then SAN="IP:${DOMAIN}"; else SAN="DNS:${DOMAIN}"; fi
+  openssl x509 -req -in /etc/nova-panel/local-server.csr -CA "$LOCAL_CA_PATH" \
+    -CAkey /etc/nova-panel/local-ca.key -CAcreateserial -out "$TLS_CERT_PATH" -days 825 -sha256 \
+    -extfile <(printf 'subjectAltName=%s\nextendedKeyUsage=serverAuth\n' "$SAN")
+  rm -f /etc/nova-panel/local-server.csr /etc/nova-panel/local-ca.srl
+  chown root:root "$LOCAL_CA_PATH" "$TLS_CERT_PATH" "$TLS_KEY_PATH"
+  chmod 0644 "$LOCAL_CA_PATH" "$TLS_CERT_PATH"
+fi
+
+if [[ "$LOCAL_MODE" != true ]]; then
+  cat > "$NGINX_SITE" <<EOF
 server {
-    listen 80;
-    listen [::]:80;
+${NGINX_HTTP_LISTEN}
     server_name ${DOMAIN};
     client_max_body_size 14m;
     location = /api/install/initialize { return 404; }
@@ -184,25 +279,24 @@ server {
     location / { proxy_pass http://127.0.0.1:3000; proxy_http_version 1.1; proxy_set_header Host \$host; proxy_set_header X-Real-IP \$remote_addr; proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for; proxy_set_header X-Forwarded-Proto \$scheme; proxy_set_header Upgrade \$http_upgrade; proxy_set_header Connection "upgrade"; proxy_read_timeout 300s; }
 }
 EOF
-ln -sfn "$NGINX_SITE" "$NGINX_ENABLED"
-nginx -t
-systemctl reload nginx
-certbot certonly --non-interactive --agree-tos --email "$EMAIL" --nginx -d "$DOMAIN"
+  ln -sfn "$NGINX_SITE" "$NGINX_ENABLED"
+  nginx -t
+  systemctl reload nginx
+  certbot certonly --non-interactive --agree-tos --email "$EMAIL" --nginx -d "$DOMAIN"
+fi
 
 cat > "$NGINX_SITE" <<EOF
 server {
-    listen 80;
-    listen [::]:80;
+${NGINX_HTTP_LISTEN}
     server_name ${DOMAIN};
     location /.well-known/acme-challenge/ { root /var/www/html; }
     location / { return 301 https://\$host\$request_uri; }
 }
 server {
-    listen 443 ssl http2;
-    listen [::]:443 ssl http2;
+${NGINX_HTTPS_LISTEN}
     server_name ${DOMAIN};
-    ssl_certificate /etc/letsencrypt/live/${DOMAIN}/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/${DOMAIN}/privkey.pem;
+    ssl_certificate ${TLS_CERT_PATH};
+    ssl_certificate_key ${TLS_KEY_PATH};
     ssl_protocols TLSv1.2 TLSv1.3;
     client_max_body_size 14m;
     location = /api/install/initialize { return 404; }
@@ -210,6 +304,7 @@ server {
     location / { proxy_pass http://127.0.0.1:3000; proxy_http_version 1.1; proxy_set_header Host \$host; proxy_set_header X-Real-IP \$remote_addr; proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for; proxy_set_header X-Forwarded-Proto \$scheme; proxy_set_header Upgrade \$http_upgrade; proxy_set_header Connection "upgrade"; proxy_read_timeout 300s; }
 }
 EOF
+ln -sfn "$NGINX_SITE" "$NGINX_ENABLED"
 nginx -t
 systemctl reload nginx
 
@@ -310,12 +405,14 @@ cat > "$AGENT_ENV" <<EOF
 NOVA_NODE_ID=${NODE_ID}
 NOVA_SHARED_SECRET=${SHARED_SECRET}
 NOVA_CONTROL_URL=${PANEL_ORIGIN}
-NOVA_TLS_CERT=/etc/letsencrypt/live/${DOMAIN}/fullchain.pem
-NOVA_TLS_KEY=/etc/letsencrypt/live/${DOMAIN}/privkey.pem
+NOVA_TLS_CERT=${TLS_CERT_PATH}
+NOVA_TLS_KEY=${TLS_KEY_PATH}
+NOVA_LISTEN=${AGENT_LISTEN}
 NOVA_SITE_ROOT=/srv/nova/sites
 NOVA_ACME_EMAIL=${EMAIL}
 NOVA_ACME_STAGING=false
 EOF
+if [[ "$LOCAL_MODE" == true ]]; then printf 'SSL_CERT_FILE=%s\n' "$LOCAL_CA_PATH" >> "$AGENT_ENV"; fi
 chown root:root "$AGENT_ENV"
 chmod 0600 "$AGENT_ENV"
 
@@ -327,18 +424,25 @@ rm -f "$AGENT_TMP"
 trap - EXIT
 "$INSTALL_DIR/apps/agent/deploy/install-agent.sh" /usr/local/sbin/nova-agent "$AGENT_ENV"
 
-if command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q 'Status: inactive'; then
+if [[ "$LAN_ADDRESS_MODE" == true ]]; then
+  echo 'LAN mode: configure firewall access to ports 80, 443, and 8443 only from trusted LAN ranges; this installer does not open LAN-mode ports in UFW.' >&2
+elif [[ "$LOCAL_MODE" != true ]] && command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q 'Status: inactive'; then
   echo 'UFW is inactive; configure your VPS provider firewall to allow TCP 80, 443, and 8443 (and preserve your SSH port).' >&2
 fi
 
+LOCAL_CA_NOTICE=''
+if [[ "$LOCAL_MODE" == true ]]; then
+  LOCAL_CA_NOTICE='Local mode: install /etc/nova-panel/local-ca.crt as a trusted certificate authority on each client to remove the browser warning. Localhost hostnames bind to loopback; a private IPv4 address binds only to that interface.'
+fi
 cat <<EOF
 
 Nova Hosting installation is up.
 Panel: https://${DOMAIN}
+${LOCAL_CA_NOTICE}
 Initial administrator: username admin / password admin
 The first login requires an immediate password change. The password is never reset on reruns.
 Local Node agent: systemd service installed; wait for its authenticated heartbeat/inventory in the dashboard.
 
 Keep /etc/nova-panel/api.env (root:nova-api, 0640) and /etc/nova-agent/agent.env (root-only, 0600) backed up securely.
-This installer configures PostgreSQL, Node.js, Go, Nginx, Certbot, the API/web services, migrations, TLS, and the Local Node agent. Review your provider firewall; only ports 80, 443, and 8443 need public access. Never expose 3000, 4000, or 5432.
+This installer configures PostgreSQL, Node.js, Go, Nginx, the API/web services, migrations, TLS, and the Local Node agent. Public mode uses Let’s Encrypt and needs public DNS plus inbound TCP 80, 443, and 8443. Local mode uses a private CA and does not require public DNS or public firewall access. Never expose 3000, 4000, or 5432.
 EOF

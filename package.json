@@ -1,0 +1,20 @@
+{
+  "name": "nova-hosting",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Independent hosting control plane and node agent",
+  "workspaces": ["apps/*"],
+  "scripts": {
+    "dev": "concurrently -k -n api,web -c cyan,magenta \"npm:dev:api\" \"npm:dev:web\"",
+    "dev:api": "npm --workspace @nova/api run dev",
+    "dev:web": "npm --workspace @nova/web run dev",
+    "start:api": "npm --workspace @nova/api start",
+    "build": "npm run build --workspace @nova/api && npm run build --workspace @nova/web",
+    "typecheck": "npm run typecheck --workspace @nova/api && npm run typecheck --workspace @nova/web",
+    "test": "npm --workspace @nova/api test",
+    "db:generate": "npm --workspace @nova/api run db:generate",
+    "db:migrate": "npm --workspace @nova/api run db:migrate"
+  },
+  "devDependencies": { "concurrently": "^9.1.2" },
+  "overrides": { "monaco-editor": { "dompurify": "^3.4.18" } }
+}

@@ -1,0 +1,36 @@
+[Unit]
+Description=Nova Hosting restricted node agent
+Documentation=https://github.com/anuragbiswas9733832815-boop/NovaPanel
+After=network-online.target nginx.service
+Wants=network-online.target
+Requires=nginx.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+EnvironmentFile=/etc/nova-agent/agent.env
+ExecStart=/usr/local/sbin/nova-agent
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=12s
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_FOWNER CAP_CHOWN
+ReadWritePaths=/srv/nova/sites /etc/nginx/sites-available /etc/nginx/sites-enabled /var/log/nginx /etc/letsencrypt /var/lib/letsencrypt /var/log/letsencrypt
+
+[Install]
+WantedBy=multi-user.target
